@@ -1,4 +1,4 @@
-"""User-author affinity generator for participant solution."""
+"""User recent author affinity generator using short-term interaction profile."""
 
 from __future__ import annotations
 
@@ -8,24 +8,24 @@ import pandas as pd
 from src.platform.core.dataset import Dataset
 
 
-class UserAuthorGenerator:
-    """Generate candidates from user author preference profiles.
+class UserAuthorRecentGenerator:
+    """Generate candidates from a user's recent (short-window) author preferences.
 
-    The generator expands author-level affinity into concrete editions by
-    combining normalized user-author weights with a weighted edition popularity
-    prior (reads weighted 1.25×, wishlists 1.0×). A vectorised pandas-merge
-    pipeline replaces the previous Python loops. Seen positives are filtered
-    before top-k truncation to maximise useful recall per budget unit.
+    Uses the `user_author_profile_recent` feature (built over the last
+    `recent_days` of observed history, default 30 days) paired with a
+    temporal popularity prior. Recent author affinity captures short-term
+    reading patterns more relevant to incident-window recovery than an all-time
+    profile. Seen positives are filtered before top-k truncation.
     """
 
-    name = "user_author"
+    name = "user_author_recent"
 
-    def __init__(self, author_smoothing: float = 1.0, show_progress: bool = False) -> None:
-        """Store hyperparameters used by author-based scoring.
+    def __init__(self, author_smoothing: float = 0.5, show_progress: bool = False) -> None:
+        """Store hyperparameters controlling recent author scoring.
 
         Args:
-            author_smoothing: Additive prior for each author-edition edge.
-            show_progress: Retained for API compatibility; unused after vectorisation.
+            author_smoothing: Additive prior applied to per-edition popularity.
+            show_progress: Retained for API compatibility.
         """
         self.author_smoothing = author_smoothing
         self.show_progress = show_progress
@@ -38,26 +38,31 @@ class UserAuthorGenerator:
         k: int,
         seed: int,
     ) -> pd.DataFrame:
-        """Emit top-k author-driven candidates for every target user.
+        """Emit top-k recent-author-driven candidates for every target user.
 
         Args:
             dataset: Runtime dataset containing edition-to-author mapping.
             user_ids: Target users for candidate generation.
-            features: Long feature table with `user_author_profile`.
+            features: Long feature table with `user_author_profile_recent`.
             k: Maximum number of candidates generated per user.
-            seed: Pipeline seed (unused by deterministic score aggregation).
+            seed: Pipeline seed (unused by this deterministic generator).
 
         Returns:
             Candidate DataFrame with required schema and source name.
         """
         del seed
-        user_profile = features[features["feature_type"] == "user_author_profile"][
+        user_profile = features[features["feature_type"] == "user_author_profile_recent"][
             ["user_id", "author_id", "value"]
         ].rename(columns={"value": "weight"})
         if user_profile.empty:
             return pd.DataFrame(columns=["user_id", "edition_id", "score", "source"])
 
-        for pop_type in ("edition_popularity_weighted", "edition_popularity_all"):
+        pop_df = pd.DataFrame()
+        for pop_type in (
+            "edition_popularity_w30",
+            "edition_popularity_weighted",
+            "edition_popularity_all",
+        ):
             pop_df = features[features["feature_type"] == pop_type][
                 ["edition_id", "value"]
             ].rename(columns={"value": "pop"})
@@ -101,4 +106,3 @@ class UserAuthorGenerator:
         result = result.groupby("user_id", group_keys=False).head(k)
         result["source"] = self.name
         return result[["user_id", "edition_id", "score", "source"]].reset_index(drop=True)
-
