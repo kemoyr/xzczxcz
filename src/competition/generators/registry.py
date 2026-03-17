@@ -9,6 +9,18 @@ from src.competition.generators.global_temporal_popularity import (
     GlobalTemporalPopularityGenerator,
 )
 from src.competition.generators.item_cooccurrence import ItemCooccurrenceGenerator
+from src.competition.generators.post_incident_author_profile import (
+    PostIncidentAuthorProfileGenerator,
+)
+from src.competition.generators.post_incident_genre_profile import (
+    PostIncidentGenreProfileGenerator,
+)
+from src.competition.generators.post_incident_language_profile import (
+    PostIncidentLanguageProfileGenerator,
+)
+from src.competition.generators.post_incident_publisher_profile import (
+    PostIncidentPublisherProfileGenerator,
+)
 from src.competition.generators.svd_cf import SVDCollaborativeGenerator
 from src.competition.generators.user_author import UserAuthorGenerator
 from src.competition.generators.user_author_recent import UserAuthorRecentGenerator
@@ -92,6 +104,42 @@ def _build_item_cooccurrence(params: dict[str, float], tqdm_enabled: bool) -> ob
     )
 
 
+def _build_post_incident_genre_profile(
+    params: dict[str, float], tqdm_enabled: bool
+) -> object:
+    return PostIncidentGenreProfileGenerator(
+        genre_smoothing=float(params.get("genre_smoothing", 0.4)),
+        show_progress=tqdm_enabled,
+    )
+
+
+def _build_post_incident_author_profile(
+    params: dict[str, float], tqdm_enabled: bool
+) -> object:
+    return PostIncidentAuthorProfileGenerator(
+        author_smoothing=float(params.get("author_smoothing", 0.4)),
+        show_progress=tqdm_enabled,
+    )
+
+
+def _build_post_incident_language_profile(
+    params: dict[str, float], tqdm_enabled: bool
+) -> object:
+    return PostIncidentLanguageProfileGenerator(
+        language_smoothing=float(params.get("language_smoothing", 0.3)),
+        show_progress=tqdm_enabled,
+    )
+
+
+def _build_post_incident_publisher_profile(
+    params: dict[str, float], tqdm_enabled: bool
+) -> object:
+    return PostIncidentPublisherProfileGenerator(
+        publisher_smoothing=float(params.get("publisher_smoothing", 0.3)),
+        show_progress=tqdm_enabled,
+    )
+
+
 def _build_svd_cf(params: dict[str, float], tqdm_enabled: bool) -> object:
     return SVDCollaborativeGenerator(
         n_factors=int(params.get("n_factors", 64)),
@@ -110,6 +158,10 @@ GENERATOR_REGISTRY: dict[str, GeneratorFactory] = {
     "user_author_recent": _build_user_author_recent,
     "user_language": _build_user_language,
     "user_publisher": _build_user_publisher,
+    "post_incident_genre_profile": _build_post_incident_genre_profile,
+    "post_incident_author_profile": _build_post_incident_author_profile,
+    "post_incident_language_profile": _build_post_incident_language_profile,
+    "post_incident_publisher_profile": _build_post_incident_publisher_profile,
     "item_cooccurrence": _build_item_cooccurrence,
     "svd_cf": _build_svd_cf,
 }

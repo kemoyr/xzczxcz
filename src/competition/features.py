@@ -302,6 +302,48 @@ def build_features_frame(dataset: Dataset, recent_days: int) -> pd.DataFrame:
             "user_language_profile_incident",
         )
     )
+    feature_blocks.append(
+        _normalized_profile(
+            incident_df,
+            user_publisher_map,
+            "publisher_id",
+            "user_publisher_profile_incident",
+        )
+    )
+
+    # Post-incident profiles transfer user taste from November into October-loss recovery.
+    feature_blocks.append(
+        _normalized_profile(
+            post_incident_df,
+            user_genre_map,
+            "genre_id",
+            "user_genre_profile_post_incident",
+        )
+    )
+    feature_blocks.append(
+        _normalized_profile(
+            post_incident_df,
+            user_author_map,
+            "author_id",
+            "user_author_profile_post_incident",
+        )
+    )
+    feature_blocks.append(
+        _normalized_profile(
+            post_incident_df,
+            user_language_map,
+            "language_id",
+            "user_language_profile_post_incident",
+        )
+    )
+    feature_blocks.append(
+        _normalized_profile(
+            post_incident_df,
+            user_publisher_map,
+            "publisher_id",
+            "user_publisher_profile_post_incident",
+        )
+    )
 
     # Clean-history popularity: popularity of editions in the 150 days before
     # the incident, useful as a long-run baseline to contrast with incident pop.

@@ -54,6 +54,26 @@ candidates:
         author_smoothing: 0.5
 
     # ------------------------------------------------------------------
+    # Post-incident profile transfer – map November user profile to
+    # incident-popular October candidates.
+    # ------------------------------------------------------------------
+    - name: post_incident_genre_profile
+      params:
+        genre_smoothing: 0.4
+
+    - name: post_incident_author_profile
+      params:
+        author_smoothing: 0.4
+
+    - name: post_incident_language_profile
+      params:
+        language_smoothing: 0.3
+
+    - name: post_incident_publisher_profile
+      params:
+        publisher_smoothing: 0.3
+
+    # ------------------------------------------------------------------
     # Collaborative signals – item co-occurrence + SVD matrix factorisation
     # ------------------------------------------------------------------
     - name: item_cooccurrence
@@ -85,5 +105,9 @@ ranking:
     user_publisher: 0.8
     user_genre_recent: 1.5
     user_author_recent: 1.6
+    post_incident_genre_profile: 1.7
+    post_incident_author_profile: 1.8
+    post_incident_language_profile: 1.3
+    post_incident_publisher_profile: 1.2
     item_cooccurrence: 1.8
     svd_cf: 2.0
