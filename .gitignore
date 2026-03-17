@@ -14,6 +14,7 @@ data/
 docs/baseline_description.md
 catboost_info/
 outputs/
+data/editions.csv
 
 # IDEs
 .vscode/

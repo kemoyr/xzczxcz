@@ -164,7 +164,8 @@ def main() -> None:
     )
     pair_recall = float(coverage["in_candidates"].fillna(0).mean())
     user_recall = (
-        coverage.groupby("user_id", as_index=False)["in_candidates"]
+        coverage.assign(in_candidates=coverage["in_candidates"].fillna(0))
+        .groupby("user_id", as_index=False)["in_candidates"]
         .mean()
         .rename(columns={"in_candidates": "candidate_recall"})
     )
