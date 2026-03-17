@@ -10,7 +10,6 @@ wheels/
 
 # Virtual environments
 .venv
-data/
 docs/baseline_description.md
 catboost_info/
 outputs/
