@@ -10,6 +10,7 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 import time
@@ -45,8 +46,21 @@ K = 20
 CONFIG_PATH = PROJECT_ROOT / "configs" / "experiments" / "high_recall.yaml"
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Fast local validation utility")
+    parser.add_argument(
+        "--reuse-existing-candidates",
+        action="store_true",
+        help="Skip candidate generation and reuse artifacts/candidates.parquet",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = _parse_args()
     data_dir = PROJECT_ROOT / "data"
+    artifacts_dir = PROJECT_ROOT / "artifacts"
+    candidates_path = artifacts_dir / "candidates.parquet"
     config = load_config(CONFIG_PATH)
     recent_days = int(config["pipeline"]["recent_days"])
     per_generator_k = int(config["candidates"]["per_generator_k"])
@@ -111,16 +125,28 @@ def main() -> None:
     logger.info("Building validation features …")
     val_features = build_features_frame(dataset=val_dataset, recent_days=recent_days)
 
-    logger.info("Generating validation candidates (strict, no injection) …")
-    val_candidates = run_generators(
-        dataset=val_dataset,
-        features=val_features,
-        user_ids=targets["user_id"].astype("int64"),
-        generators_cfg=generators_cfg,
-        per_generator_k=per_generator_k,
-        seed=SEED,
-        tqdm_enabled=False,
-    )
+    if args.reuse_existing_candidates:
+        if not candidates_path.exists():
+            logger.error(
+                "reuse-existing-candidates requested, but %s is missing",
+                candidates_path,
+            )
+            sys.exit(1)
+        logger.info("Reusing existing candidates from %s", candidates_path)
+        all_candidates = pd.read_parquet(candidates_path)
+        val_user_ids = set(targets["user_id"].tolist())
+        val_candidates = all_candidates[all_candidates["user_id"].isin(val_user_ids)].copy()
+    else:
+        logger.info("Generating validation candidates (strict, no injection) …")
+        val_candidates = run_generators(
+            dataset=val_dataset,
+            features=val_features,
+            user_ids=targets["user_id"].astype("int64"),
+            generators_cfg=generators_cfg,
+            per_generator_k=per_generator_k,
+            seed=SEED,
+            tqdm_enabled=False,
+        )
     logger.info(
         "Validation candidates: %d rows for %d users, sources=%s",
         len(val_candidates),
