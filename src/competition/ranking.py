@@ -24,8 +24,10 @@ logger = logging.getLogger(__name__)
 
 _INCIDENT_START_TS = pd.Timestamp("2025-10-01 00:00:00")
 _INCIDENT_END_TS = pd.Timestamp("2025-11-01 00:00:00")
+_POST_INCIDENT_END_TS = pd.Timestamp("2025-12-01 00:00:00")
 _PSEUDO_INCIDENT_DAYS = 14
 _N_ROLLING_WINDOWS = 6
+_INJECT_PSEUDO_POSITIVES = True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,12 +65,10 @@ def _source_score_features(candidates: pd.DataFrame) -> pd.DataFrame:
     return pivoted
 
 
-def _user_activity_features(positives: pd.DataFrame) -> pd.DataFrame:
+def _user_activity_features(pre_incident: pd.DataFrame, incident_start: pd.Timestamp) -> pd.DataFrame:
     """Per-user activity counts over multiple windows with log1p transforms."""
-    if positives.empty:
+    if pre_incident.empty:
         return pd.DataFrame(columns=["user_id"])
-
-    max_ts = positives["event_ts"].max()
 
     def unique_editions(df: pd.DataFrame, col: str) -> pd.DataFrame:
         return (
@@ -77,39 +77,39 @@ def _user_activity_features(positives: pd.DataFrame) -> pd.DataFrame:
             .rename(columns={"edition_id": col})
         )
 
-    total = unique_editions(positives, "user_n_positives")
+    total = unique_editions(pre_incident, "user_n_positives")
     w7 = unique_editions(
-        positives[positives["event_ts"] >= max_ts - pd.Timedelta(days=7)],
+        pre_incident[pre_incident["event_ts"] >= incident_start - pd.Timedelta(days=7)],
         "user_n_positives_w7",
     )
     w14 = unique_editions(
-        positives[positives["event_ts"] >= max_ts - pd.Timedelta(days=14)],
+        pre_incident[pre_incident["event_ts"] >= incident_start - pd.Timedelta(days=14)],
         "user_n_positives_w14",
     )
     w30 = unique_editions(
-        positives[positives["event_ts"] >= max_ts - pd.Timedelta(days=30)],
+        pre_incident[pre_incident["event_ts"] >= incident_start - pd.Timedelta(days=30)],
         "user_n_positives_w30",
     )
     w90 = unique_editions(
-        positives[positives["event_ts"] >= max_ts - pd.Timedelta(days=90)],
+        pre_incident[pre_incident["event_ts"] >= incident_start - pd.Timedelta(days=90)],
         "user_n_positives_w90",
     )
 
     last_ts = (
-        positives.groupby("user_id", as_index=False)["event_ts"]
+        pre_incident.groupby("user_id", as_index=False)["event_ts"]
         .max()
         .rename(columns={"event_ts": "last_ts"})
     )
-    last_ts["user_days_since_last"] = (max_ts - last_ts["last_ts"]).dt.days.astype(float)
+    last_ts["user_days_since_last"] = (incident_start - last_ts["last_ts"]).dt.days.astype(float)
 
     reads_per_user = (
-        positives[positives["event_type"] == 2]
+        pre_incident[pre_incident["event_type"] == 2]
         .groupby("user_id", as_index=False)["edition_id"]
         .count()
         .rename(columns={"edition_id": "user_n_reads"})
     )
     wishlists_per_user = (
-        positives[positives["event_type"] == 1]
+        pre_incident[pre_incident["event_type"] == 1]
         .groupby("user_id", as_index=False)["edition_id"]
         .count()
         .rename(columns={"edition_id": "user_n_wishlists"})
@@ -152,12 +152,11 @@ def _user_activity_features(positives: pd.DataFrame) -> pd.DataFrame:
     return user_feats
 
 
-def _item_popularity_features(positives: pd.DataFrame) -> pd.DataFrame:
+def _item_popularity_features(observed_positives: pd.DataFrame, incident_start: pd.Timestamp, incident_end: pd.Timestamp) -> pd.DataFrame:
     """Per-item popularity over multiple windows with trend ratios and log1p."""
-    if positives.empty:
+    pre_incident = observed_positives[observed_positives["event_ts"] < incident_start]
+    if pre_incident.empty:
         return pd.DataFrame(columns=["edition_id"])
-
-    max_ts = positives["event_ts"].max()
 
     def pop(df: pd.DataFrame, col: str) -> pd.DataFrame:
         return (
@@ -166,34 +165,32 @@ def _item_popularity_features(positives: pd.DataFrame) -> pd.DataFrame:
             .rename(columns={"user_id": col})
         )
 
-    incident_end = _INCIDENT_START_TS + pd.Timedelta(days=31)
-
-    all_pop = pop(positives, "item_pop_all")
+    all_pop = pop(pre_incident, "item_pop_all")
     w7_pop = pop(
-        positives[positives["event_ts"] >= max_ts - pd.Timedelta(days=7)],
+        pre_incident[pre_incident["event_ts"] >= incident_start - pd.Timedelta(days=7)],
         "item_pop_w7",
     )
     w14_pop = pop(
-        positives[positives["event_ts"] >= max_ts - pd.Timedelta(days=14)],
+        pre_incident[pre_incident["event_ts"] >= incident_start - pd.Timedelta(days=14)],
         "item_pop_w14",
     )
     w30_pop = pop(
-        positives[positives["event_ts"] >= max_ts - pd.Timedelta(days=30)],
+        pre_incident[pre_incident["event_ts"] >= incident_start - pd.Timedelta(days=30)],
         "item_pop_w30",
     )
     w90_pop = pop(
-        positives[positives["event_ts"] >= max_ts - pd.Timedelta(days=90)],
+        pre_incident[pre_incident["event_ts"] >= incident_start - pd.Timedelta(days=90)],
         "item_pop_w90",
     )
     incident_pop = pop(
-        positives[
-            (positives["event_ts"] >= _INCIDENT_START_TS)
-            & (positives["event_ts"] < incident_end)
+        observed_positives[
+            (observed_positives["event_ts"] >= incident_start)
+            & (observed_positives["event_ts"] < incident_end)
         ],
         "item_pop_incident",
     )
-    reads = pop(positives[positives["event_type"] == 2], "item_n_reads")
-    wishlists = pop(positives[positives["event_type"] == 1], "item_n_wishlists")
+    reads = pop(pre_incident[pre_incident["event_type"] == 2], "item_n_reads")
+    wishlists = pop(pre_incident[pre_incident["event_type"] == 1], "item_n_wishlists")
 
     item_feats = (
         all_pop
@@ -244,6 +241,22 @@ def _item_catalogue_features(dataset: Dataset) -> pd.DataFrame:
     return cat
 
 
+def _user_demographic_features(dataset: Dataset) -> pd.DataFrame:
+    """User-level demographic features from users.csv."""
+    users = dataset.users_df[["user_id", "gender", "age"]].copy()
+    users["age_missing"] = users["age"].isna().astype(int)
+    users["gender"] = users["gender"].fillna(0).astype(int)
+    users["age"] = users["age"].fillna(users["age"].median())
+    users["age"] = users["age"].fillna(0.0).astype(float)
+    users["age_bucket"] = pd.cut(
+        users["age"],
+        bins=[-1, 18, 25, 35, 50, 200],
+        labels=False,
+        include_lowest=True,
+    ).fillna(5).astype(int)
+    return users
+
+
 def _rating_features(
     positives: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -270,8 +283,11 @@ def _rating_features(
 
 def _cross_features(
     pairs: pd.DataFrame,
-    positives: pd.DataFrame,
+    observed_positives: pd.DataFrame,
     dataset: Dataset,
+    incident_start: pd.Timestamp,
+    incident_end: pd.Timestamp,
+    post_end: pd.Timestamp,
 ) -> pd.DataFrame:
     """User×item affinity for author/language/genre/publisher (all + post window)."""
     result = pairs[["user_id", "edition_id"]].copy()
@@ -362,11 +378,15 @@ def _cross_features(
             block[col] = block[col].fillna(0.0)
         return block
 
-    all_block = _build_affinity_block(positives, suffix="")
-    post_block = _build_affinity_block(
-        positives[positives["event_ts"] >= _INCIDENT_END_TS],
-        suffix="_post",
-    )
+    pre_incident = observed_positives[observed_positives["event_ts"] < incident_start]
+    all_block = _build_affinity_block(pre_incident, suffix="")
+    
+    post_incident = observed_positives[
+        (observed_positives["event_ts"] >= incident_end)
+        & (observed_positives["event_ts"] < post_end)
+    ]
+    post_block = _build_affinity_block(post_incident, suffix="_post")
+    
     return all_block.merge(
         post_block,
         on=["user_id", "edition_id"],
@@ -376,28 +396,33 @@ def _cross_features(
 
 def _build_feature_matrix(
     candidates: pd.DataFrame,
-    positives: pd.DataFrame,
+    observed_positives: pd.DataFrame,
     dataset: Dataset,
+    incident_start: pd.Timestamp,
+    incident_end: pd.Timestamp,
+    post_end: pd.Timestamp,
 ) -> pd.DataFrame:
     """Assemble the full feature matrix for (user, item) candidate pairs.
 
-    ``positives`` must contain only interactions from the observation window
-    (i.e. strictly before any pseudo-incident start) to prevent temporal
-    leakage during training.  At inference time the full observed history is
-    passed in, which is correct.
+    ``observed_positives`` must contain interactions properly partitioned
+    by the provided boundaries to prevent temporal leakage.
     """
     src_feats = _source_score_features(candidates)
     pairs = src_feats[["user_id", "edition_id"]].copy()
 
-    user_feats = _user_activity_features(positives)
-    item_pop_feats = _item_popularity_features(positives)
+    pre_incident = observed_positives[observed_positives["event_ts"] < incident_start]
+
+    user_feats = _user_activity_features(pre_incident, incident_start)
+    user_demo_feats = _user_demographic_features(dataset)
+    item_pop_feats = _item_popularity_features(observed_positives, incident_start, incident_end)
     item_cat_feats = _item_catalogue_features(dataset)
-    item_rating_feats, user_rating_feats = _rating_features(positives)
-    cross_feats = _cross_features(pairs, positives, dataset)
+    item_rating_feats, user_rating_feats = _rating_features(pre_incident)
+    cross_feats = _cross_features(pairs, observed_positives, dataset, incident_start, incident_end, post_end)
 
     feat = (
         src_feats
         .merge(user_feats, on="user_id", how="left")
+        .merge(user_demo_feats, on="user_id", how="left")
         .merge(item_pop_feats, on="edition_id", how="left")
         .merge(item_cat_feats, on="edition_id", how="left")
         .merge(item_rating_feats, on="edition_id", how="left")
@@ -422,22 +447,7 @@ def _build_feature_matrix(
         feat["rating_relative_to_user"] = feat["item_mean_rating"] - feat["user_mean_rating"]
         feat["rating_relative_to_user"] = feat["rating_relative_to_user"].fillna(0.0)
 
-    # Multiplicative cross features: source signal × affinity/trend
-    src_cols = [c for c in feat.columns if c.startswith("src_")]
-    if src_cols:
-        max_src = feat[src_cols].max(axis=1)
-        if "user_author_affinity" in feat.columns:
-            feat["src_max_x_author_affinity"] = max_src * feat["user_author_affinity"]
-        if "user_genre_affinity" in feat.columns:
-            feat["src_max_x_genre_affinity"] = max_src * feat["user_genre_affinity"]
-        if "user_author_affinity_post" in feat.columns:
-            feat["src_max_x_author_affinity_post"] = max_src * feat["user_author_affinity_post"]
-        if "user_genre_affinity_post" in feat.columns:
-            feat["src_max_x_genre_affinity_post"] = max_src * feat["user_genre_affinity_post"]
-        if "item_trend_short_long" in feat.columns:
-            feat["src_max_x_item_trend"] = max_src * feat["item_trend_short_long"]
-        if "log1p_user_n_positives_w30" in feat.columns:
-            feat["src_max_x_user_activity"] = max_src * feat["log1p_user_n_positives_w30"]
+    # Multiplicative cross features
     if "item_pop_incident" in feat.columns:
         if "user_author_affinity_post" in feat.columns:
             feat["item_pop_incident_x_user_author_affinity_post"] = (
@@ -507,6 +517,176 @@ def _inject_pseudo_positives(
     return pd.concat([fold_candidates, new_pos], ignore_index=True)
 
 
+def _activity_bucket_from_counts(counts: pd.Series) -> pd.Series:
+    """Map per-user unique-positive counts to coarse activity buckets."""
+    return pd.cut(
+        counts.fillna(0.0),
+        bins=[0, 5, 20, 50, float("inf")],
+        labels=["cold", "light", "medium", "heavy"],
+        include_lowest=True,
+    ).astype(str)
+
+
+def _normalize_multiplier(mapping: dict[object, float]) -> dict[object, float]:
+    """Rescale multiplier map so the average value is ~1.0."""
+    if not mapping:
+        return mapping
+    vals = np.array(list(mapping.values()), dtype=float)
+    mean_val = float(vals.mean()) if len(vals) else 1.0
+    if mean_val <= 0:
+        return {k: 1.0 for k in mapping}
+    return {k: float(v) / mean_val for k, v in mapping.items()}
+
+
+def _estimate_incident_loss_bias(
+    all_positives: pd.DataFrame,
+) -> tuple[dict[int, float], dict[int, float], dict[str, float]]:
+    """Estimate non-random loss pattern from observed incident statistics.
+
+    Returns multiplicative biases for:
+      - event_type (wishlist/read)
+      - hour of day
+      - user activity bucket
+    Bias > 1 means segment appears under-represented in incident vs pre+post.
+    """
+    pre_df = all_positives[
+        (all_positives["event_ts"] >= _INCIDENT_START_TS - pd.Timedelta(days=31))
+        & (all_positives["event_ts"] < _INCIDENT_START_TS)
+    ]
+    incident_df = all_positives[
+        (all_positives["event_ts"] >= _INCIDENT_START_TS)
+        & (all_positives["event_ts"] < _INCIDENT_END_TS)
+    ]
+    post_df = all_positives[
+        (all_positives["event_ts"] >= _INCIDENT_END_TS)
+        & (all_positives["event_ts"] < _POST_INCIDENT_END_TS)
+    ]
+
+    if pre_df.empty or incident_df.empty or post_df.empty:
+        return ({1: 1.0, 2: 1.0}, {h: 1.0 for h in range(24)}, {"cold": 1.0, "light": 1.0, "medium": 1.0, "heavy": 1.0})
+
+    pre_days = max((pre_df["event_ts"].max() - pre_df["event_ts"].min()).days + 1, 1)
+    incident_days = max((incident_df["event_ts"].max() - incident_df["event_ts"].min()).days + 1, 1)
+    post_days = max((post_df["event_ts"].max() - post_df["event_ts"].min()).days + 1, 1)
+
+    # 1) Event-type asymmetry
+    type_mult: dict[int, float] = {}
+    for et in (1, 2):
+        pre_rate = float((pre_df["event_type"] == et).sum()) / pre_days
+        post_rate = float((post_df["event_type"] == et).sum()) / post_days
+        inc_rate = float((incident_df["event_type"] == et).sum()) / incident_days
+        expected_rate = max((pre_rate + post_rate) / 2.0, 1e-9)
+        loss = max(0.0, 1.0 - (inc_rate / expected_rate))
+        type_mult[et] = 1.0 + loss
+    type_mult = _normalize_multiplier(type_mult)
+
+    # 2) Hour-of-day temporal clusters
+    pre_h = pre_df["event_ts"].dt.hour.value_counts().to_dict()
+    inc_h = incident_df["event_ts"].dt.hour.value_counts().to_dict()
+    post_h = post_df["event_ts"].dt.hour.value_counts().to_dict()
+    hour_mult: dict[int, float] = {}
+    for h in range(24):
+        pre_rate = float(pre_h.get(h, 0.0)) / pre_days
+        post_rate = float(post_h.get(h, 0.0)) / post_days
+        inc_rate = float(inc_h.get(h, 0.0)) / incident_days
+        expected_rate = max((pre_rate + post_rate) / 2.0, 1e-9)
+        loss = max(0.0, 1.0 - (inc_rate / expected_rate))
+        hour_mult[h] = 1.0 + loss
+    hour_mult = _normalize_multiplier(hour_mult)
+
+    # 3) User-activity segment bias
+    user_hist_counts = (
+        all_positives[all_positives["event_ts"] < _INCIDENT_START_TS]
+        .groupby("user_id")["edition_id"]
+        .nunique()
+    )
+    user_bucket = _activity_bucket_from_counts(user_hist_counts)
+
+    def _bucket_rate(df: pd.DataFrame, days: int) -> dict[str, float]:
+        if df.empty:
+            return {}
+        tmp = df[["user_id"]].copy()
+        tmp["bucket"] = tmp["user_id"].map(user_bucket).fillna("cold")
+        counts = tmp["bucket"].value_counts().to_dict()
+        return {k: float(v) / max(days, 1) for k, v in counts.items()}
+
+    pre_b = _bucket_rate(pre_df, pre_days)
+    inc_b = _bucket_rate(incident_df, incident_days)
+    post_b = _bucket_rate(post_df, post_days)
+    bucket_mult: dict[str, float] = {}
+    for b in ("cold", "light", "medium", "heavy"):
+        pre_rate = pre_b.get(b, 0.0)
+        post_rate = post_b.get(b, 0.0)
+        inc_rate = inc_b.get(b, 0.0)
+        expected_rate = max((pre_rate + post_rate) / 2.0, 1e-9)
+        loss = max(0.0, 1.0 - (inc_rate / expected_rate))
+        bucket_mult[b] = 1.0 + loss
+    bucket_mult = _normalize_multiplier(bucket_mult)
+    return type_mult, hour_mult, bucket_mult
+
+
+def _sample_structured_pseudo_pairs(
+    window_events: pd.DataFrame,
+    user_hist_counts: pd.Series,
+    type_mult: dict[int, float],
+    hour_mult: dict[int, float],
+    bucket_mult: dict[str, float],
+    rng: np.random.Generator,
+    mask_fraction: float = 0.20,
+) -> pd.DataFrame:
+    """Sample pseudo-positive pairs with non-random incident-like bias."""
+    if window_events.empty:
+        return pd.DataFrame(columns=["user_id", "edition_id"])
+
+    pair_events = (
+        window_events.sort_values("event_ts")
+        .drop_duplicates(subset=["user_id", "edition_id"], keep="last")
+        .copy()
+    )
+    if pair_events.empty:
+        return pd.DataFrame(columns=["user_id", "edition_id"])
+
+    user_bucket = _activity_bucket_from_counts(user_hist_counts)
+    pair_events["bucket"] = pair_events["user_id"].map(user_bucket).fillna("cold")
+    pair_events["hour"] = pair_events["event_ts"].dt.hour.astype(int)
+
+    w_type = pair_events["event_type"].map(type_mult).fillna(1.0).astype(float)
+    w_hour = pair_events["hour"].map(hour_mult).fillna(1.0).astype(float)
+    w_bucket = pair_events["bucket"].map(bucket_mult).fillna(1.0).astype(float)
+    weights = (w_type * w_hour * w_bucket).to_numpy(dtype=float)
+    weights = np.clip(weights, 1e-6, None)
+    weights = weights / weights.sum()
+
+    n_select = max(1, int(len(pair_events) * mask_fraction))
+    n_select = min(n_select, len(pair_events))
+    selected_idx = rng.choice(len(pair_events), size=n_select, replace=False, p=weights)
+    sampled = pair_events.iloc[selected_idx][["user_id", "edition_id"]].drop_duplicates()
+    return sampled.reset_index(drop=True)
+
+
+def _trim_fold_candidates_for_training(
+    fold_candidates: pd.DataFrame,
+    per_source_k: int = 120,
+) -> pd.DataFrame:
+    """Trim fold candidates to strongest rows per (user, source).
+
+    This reduces training-time compute significantly while preserving
+    source diversity and hard negatives from each generator.
+    """
+    if fold_candidates.empty:
+        return fold_candidates
+    trimmed = (
+        fold_candidates.sort_values(
+            ["user_id", "source", "score", "edition_id"],
+            ascending=[True, True, False, True],
+        )
+        .groupby(["user_id", "source"], group_keys=False)
+        .head(per_source_k)
+        .reset_index(drop=True)
+    )
+    return trimmed
+
+
 def _generate_rolling_training_data(
     candidates: pd.DataFrame,
     all_positives: pd.DataFrame,
@@ -545,10 +725,15 @@ def _generate_rolling_training_data(
     fold_frames: list[pd.DataFrame] = []
     fold_labels: list[pd.Series] = []
     fold_groups: list[pd.Series] = []
+    user_hist_counts_full = (
+        all_positives.groupby("user_id")["edition_id"].nunique().astype(float)
+    )
+    type_mult, hour_mult, bucket_mult = _estimate_incident_loss_bias(all_positives)
 
     for i in range(1, n_windows + 1):
         window_end = _INCIDENT_START_TS - pd.Timedelta(days=(i - 1) * window_days)
         window_start = window_end - pd.Timedelta(days=window_days)
+        post_end = window_end + pd.Timedelta(days=30)
 
         obs_pos = all_positives[all_positives["event_ts"] < window_start]
         if obs_pos.empty:
@@ -561,15 +746,21 @@ def _generate_rolling_training_data(
         if not active_users:
             continue
 
-        pseudo_pos = (
-            all_positives[
-                (all_positives["event_ts"] >= window_start)
-                & (all_positives["event_ts"] < window_end)
-                & (all_positives["user_id"].isin(active_users))
-            ][["user_id", "edition_id"]]
-            .drop_duplicates()
-            .assign(label=1)
-        )
+        window_events = all_positives[
+            (all_positives["event_ts"] >= window_start)
+            & (all_positives["event_ts"] < window_end)
+            & (all_positives["user_id"].isin(active_users))
+        ][["user_id", "edition_id", "event_type", "event_ts"]].copy()
+        
+        pseudo_pos = _sample_structured_pseudo_pairs(
+            window_events=window_events,
+            user_hist_counts=user_hist_counts_full,
+            type_mult=type_mult,
+            hour_mult=hour_mult,
+            bucket_mult=bucket_mult,
+            rng=np.random.default_rng(4242 + i),
+            mask_fraction=0.20,
+        ).assign(label=1)
         if pseudo_pos.empty:
             continue
 
@@ -584,12 +775,44 @@ def _generate_rolling_training_data(
             continue
 
         fold_candidates = candidates[candidates["user_id"].isin(active_target_users)].copy()
-        # Inject pseudo-positive items that are missing from candidates
-        # (generators filtered them because they appear in seen_positive_df)
-        fold_candidates = _inject_pseudo_positives(fold_candidates, pseudo_pos)
+        fold_candidates = _trim_fold_candidates_for_training(
+            fold_candidates=fold_candidates,
+            per_source_k=120,
+        )
+        # Optional: injection can make pseudo-validation too easy and hurt transfer.
+        if _INJECT_PSEUDO_POSITIVES:
+            fold_candidates = _inject_pseudo_positives(fold_candidates, pseudo_pos)
+
+        # Build observed data for this fold (excluding the masked pseudo-positives)
+        inc_observed = window_events.merge(
+            pseudo_pos[["user_id", "edition_id"]].assign(_m=1), 
+            on=["user_id", "edition_id"], 
+            how="left"
+        )
+        inc_observed = inc_observed[inc_observed["_m"].isna()].drop(columns=["_m"])
+        
+        post_df = all_positives[
+            (all_positives["event_ts"] >= window_end)
+            & (all_positives["event_ts"] < post_end)
+        ]
+        post_df = post_df.merge(
+            pseudo_pos[["user_id", "edition_id"]].assign(_m=1),
+            on=["user_id", "edition_id"],
+            how="left",
+        )
+        post_df = post_df[post_df["_m"].isna()].drop(columns=["_m"])
+        
+        fold_observed = pd.concat([obs_pos, inc_observed, post_df], ignore_index=True)
 
         try:
-            feat = _build_feature_matrix(fold_candidates, obs_pos, dataset)
+            feat = _build_feature_matrix(
+                fold_candidates, 
+                fold_observed, 
+                dataset,
+                incident_start=window_start,
+                incident_end=window_end,
+                post_end=post_end,
+            )
         except Exception as exc:
             logger.warning("Feature build failed for window %d: %s", i, exc)
             continue
@@ -607,13 +830,13 @@ def _generate_rolling_training_data(
             continue
 
         # Subsample negatives so each fold fits in memory.
-        # Keep ALL positives; randomly down-sample negatives.
-        n_neg_keep = max(n_pos * 20, max_rows_per_fold - n_pos)
+        # Keep all positives and cap negatives to memory budget.
+        n_neg_budget = max(0, max_rows_per_fold - n_pos)
         pos_idx = np.where(labels.to_numpy() == 1)[0]
         neg_idx = np.where(labels.to_numpy() == 0)[0]
-        if len(neg_idx) > n_neg_keep:
+        if len(neg_idx) > n_neg_budget:
             rng_fold = np.random.default_rng(42 + i)
-            neg_idx = rng_fold.choice(neg_idx, size=n_neg_keep, replace=False)
+            neg_idx = rng_fold.choice(neg_idx, size=n_neg_budget, replace=False)
         keep_idx = np.sort(np.concatenate([pos_idx, neg_idx]))
         feat = feat.iloc[keep_idx].reset_index(drop=True)
         labels = labels.iloc[keep_idx].reset_index(drop=True)
@@ -669,6 +892,17 @@ def _to_str_cats(X: pd.DataFrame, cat_features: list[str]) -> pd.DataFrame:
         if col in X.columns:
             X[col] = X[col].astype(str)
     return X
+
+
+def _per_user_percentile(values: np.ndarray, user_ids: pd.Series) -> np.ndarray:
+    """Convert raw model scores to per-user percentile ranks in [0, 1]."""
+    frame = pd.DataFrame({"user_id": user_ids.to_numpy(), "value": values})
+    frame["pct"] = (
+        frame.groupby("user_id")["value"]
+        .rank(method="average", pct=True)
+        .astype(float)
+    )
+    return frame["pct"].to_numpy(dtype=float)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -894,6 +1128,7 @@ class CatBoostRanker:
             l2_leaf_reg=3.0,
             subsample=0.8,
             colsample_bylevel=0.8,
+            use_best_model=False,
             verbose=50,
         )
         with warnings.catch_warnings():
@@ -972,7 +1207,7 @@ class CatBoostRanker:
             )
 
             id_cols = {"user_id", "edition_id", "_fold"}
-            cat_features = ["age_restriction", "language_id"]
+            cat_features = ["age_restriction", "language_id", "gender", "age_bucket"]
 
             if feat_all.empty or int((y_all == 1).sum()) < 10:
                 logger.warning(
@@ -986,7 +1221,19 @@ class CatBoostRanker:
             # disabled on the ranker, so all iterations are trained.
             # Earlier folds (2..n) → training data; fold 1 → eval monitoring only.
             val_fold = int(feat_all["_fold"].min())
-            feature_cols = [c for c in feat_all.columns if c not in id_cols]
+            
+            # Source scores are computed on full observed data and can leak
+            # future information into rolling pseudo-folds. Train without them
+            # and add source priors only at ensemble stage.
+            source_prefixes = ("src_", "rank_")
+            source_exact = {"rrf_score", "n_sources"}
+            feature_cols = [
+                c
+                for c in feat_all.columns
+                if c not in id_cols
+                and not any(c.startswith(p) for p in source_prefixes)
+                and c not in source_exact
+            ]
 
             train_mask = feat_all["_fold"] > val_fold
             val_mask = feat_all["_fold"] == val_fold
@@ -1023,7 +1270,14 @@ class CatBoostRanker:
                 )
 
             # Build inference feature matrix with full observed history
-            feat_infer = _build_feature_matrix(candidates, all_positives, dataset)
+            feat_infer = _build_feature_matrix(
+                candidates, 
+                all_positives, 
+                dataset,
+                incident_start=_INCIDENT_START_TS,
+                incident_end=_INCIDENT_END_TS,
+                post_end=_POST_INCIDENT_END_TS,
+            )
             X_infer = feat_infer[feature_cols].copy()
 
             # Compute component scores
@@ -1042,28 +1296,35 @@ class CatBoostRanker:
             if "rrf_score" in feat_infer.columns:
                 rrf_scores = feat_infer["rrf_score"].to_numpy()
 
-            # Ensemble: YetiRank 70% + classifier 20% + RRF 10%
-            final_scores = np.zeros(len(feat_infer))
+            # Per-user normalized ensemble is more robust than global min-max:
+            # scales differ a lot across users and candidate pools.
+            final_scores = np.zeros(len(feat_infer), dtype=float)
+            user_ids_infer = feat_infer["user_id"].reset_index(drop=True)
 
             if ranker_scores is not None:
-                rs_min, rs_max = ranker_scores.min(), ranker_scores.max()
-                if rs_max > rs_min:
-                    final_scores += 0.70 * (ranker_scores - rs_min) / (rs_max - rs_min)
-                else:
-                    final_scores += 0.70 * np.ones(len(ranker_scores))
+                ranker_pct = _per_user_percentile(ranker_scores, user_ids_infer)
+                final_scores += 0.25 * ranker_pct
 
             if clf_scores is not None:
-                final_scores += 0.20 * clf_scores
+                clf_pct = _per_user_percentile(clf_scores, user_ids_infer)
+                final_scores += 0.15 * clf_pct
+
+            src_cols = [c for c in feat_infer.columns if c.startswith("src_")]
+            if src_cols:
+                src_sum = feat_infer[src_cols].sum(axis=1).to_numpy(dtype=float)
+                src_pct = _per_user_percentile(src_sum, user_ids_infer)
+                final_scores += 0.45 * src_pct
 
             if rrf_scores is not None:
-                rrf_min, rrf_max = rrf_scores.min(), rrf_scores.max()
-                if rrf_max > rrf_min:
-                    final_scores += 0.10 * (rrf_scores - rrf_min) / (rrf_max - rrf_min)
+                rrf_pct = _per_user_percentile(rrf_scores, user_ids_infer)
+                final_scores += 0.15 * rrf_pct
 
-            # If both models failed, use source score sum as emergency fallback
+            # If both models failed, rely on source-only ranking.
             if ranker_scores is None and clf_scores is None:
-                src_cols = [c for c in feature_cols if c.startswith("src_")]
-                final_scores = X_infer[src_cols].sum(axis=1).to_numpy()
+                if src_cols:
+                    final_scores = feat_infer[src_cols].sum(axis=1).to_numpy(dtype=float)
+                else:
+                    final_scores = np.zeros(len(feat_infer), dtype=float)
 
             result = feat_infer[["user_id", "edition_id"]].copy()
             result["final_score"] = final_scores

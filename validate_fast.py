@@ -53,6 +53,16 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip candidate generation and reuse artifacts/candidates.parquet",
     )
+    parser.add_argument(
+        "--eval-scope",
+        choices=["targets", "incident_users"],
+        default="targets",
+        help=(
+            "User scope for metric aggregation: "
+            "'targets' (default, matches submission users) or "
+            "'incident_users' (diagnostic mode)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -91,6 +101,11 @@ def main() -> None:
         (positives["event_ts"] >= INCIDENT_START)
         & (positives["event_ts"] < INCIDENT_END)
     ]
+    if args.eval_scope == "targets":
+        eval_user_ids = set(dataset.targets_df["user_id"].astype("int64").tolist())
+    else:
+        eval_user_ids = set(incident_pos["user_id"].astype("int64").unique().tolist())
+    incident_pos = incident_pos[incident_pos["user_id"].isin(eval_user_ids)]
     incident_pairs = incident_pos[["user_id", "edition_id"]].drop_duplicates()
 
     if incident_pairs.empty:
@@ -109,7 +124,18 @@ def main() -> None:
             (clean_df["event_ts"] >= INCIDENT_START)
             & (clean_df["event_ts"] < INCIDENT_END)
         ]
+        if args.eval_scope == "targets":
+            eval_user_ids = set(dataset.targets_df["user_id"].astype("int64").tolist())
+        else:
+            eval_user_ids = set(incident_pos["user_id"].astype("int64").unique().tolist())
+        incident_pos = incident_pos[incident_pos["user_id"].isin(eval_user_ids)]
         incident_pairs = incident_pos[["user_id", "edition_id"]].drop_duplicates()
+
+    if incident_pairs.empty:
+        logger.error(
+            "No positive pairs in incident window for eval_scope=%s", args.eval_scope
+        )
+        sys.exit(1)
 
     rng = np.random.default_rng(SEED)
     mask_count = max(1, int(len(incident_pairs) * MASK_FRACTION))
@@ -122,6 +148,11 @@ def main() -> None:
         INCIDENT_END.date(),
         len(incident_pairs),
         len(masked_pairs),
+    )
+    logger.info(
+        "Evaluation scope: %s, users=%d",
+        args.eval_scope,
+        len(eval_user_ids),
     )
 
     # ── build masked dataset ─────────────────────────────────────────────────
@@ -143,7 +174,10 @@ def main() -> None:
         [pre_incident, incident_observed, post_incident_data], ignore_index=True
     )
 
-    targets = incident_pos[["user_id"]].drop_duplicates().astype({"user_id": "int64"})
+    if args.eval_scope == "targets":
+        targets = dataset.targets_df[["user_id"]].drop_duplicates().astype({"user_id": "int64"})
+    else:
+        targets = incident_pos[["user_id"]].drop_duplicates().astype({"user_id": "int64"})
     val_seen_df = observed[["user_id", "edition_id"]].drop_duplicates()
 
     val_dataset = Dataset(

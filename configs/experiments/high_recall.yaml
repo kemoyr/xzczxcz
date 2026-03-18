@@ -78,17 +78,17 @@ candidates:
     # ------------------------------------------------------------------
     - name: item_cooccurrence
       params:
-        cooccurrence_days: 90
-        seed_days: 45
+        cooccurrence_days: 120
+        seed_days: 60
         max_items_per_user: 30
-        top_per_seed: 200
+        top_per_seed: 250
 
     # SVD collaborative filtering: latent-factor dot-product retrieval.
     # Trains truncated SVD on the full observed user-item matrix and returns
     # top-k items per user by cosine/dot-product score.
     - name: svd_cf
       params:
-        n_factors: 64
+        n_factors: 96
         read_weight: 2.0
         wishlist_weight: 1.0
 

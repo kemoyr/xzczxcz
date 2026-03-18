@@ -10,6 +10,7 @@ CatBoostRanker, writes artifacts/predictions.parquet and artifacts/submission.cs
 
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 import time
@@ -23,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.competition.ranking import rank_predictions
+from src.platform.cli.config_loader import load_config
 from src.platform.core.artifacts import atomic_write_dataframe
 from src.platform.core.dataset import Dataset
 
@@ -34,12 +36,53 @@ logging.basicConfig(
 logger = logging.getLogger("run_rank_only")
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Rank existing candidates only")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/experiments/high_recall.yaml"),
+        help="Path to experiment config",
+    )
+    parser.add_argument(
+        "--candidates-path",
+        type=Path,
+        default=None,
+        help="Optional path to candidates parquet; defaults to best available",
+    )
+    parser.add_argument(
+        "--predictions-path",
+        type=Path,
+        default=Path("artifacts/predictions.parquet"),
+        help="Output predictions path",
+    )
+    parser.add_argument(
+        "--submission-path",
+        type=Path,
+        default=Path("artifacts/submission.csv"),
+        help="Output submission path",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = _parse_args()
     data_dir = PROJECT_ROOT / "data"
+    config_path = (PROJECT_ROOT / args.config).resolve()
+    config = load_config(config_path)
+
     artifacts_dir = PROJECT_ROOT / "artifacts"
-    candidates_path = artifacts_dir / "candidates.parquet"
-    predictions_path = artifacts_dir / "predictions.parquet"
-    submission_path = artifacts_dir / "submission.csv"
+    default_candidates_v2 = artifacts_dir / "candidates_v2.parquet"
+    default_candidates = artifacts_dir / "candidates.parquet"
+    if args.candidates_path is not None:
+        candidates_path = (PROJECT_ROOT / args.candidates_path).resolve()
+    else:
+        candidates_path = (
+            default_candidates_v2 if default_candidates_v2.exists() else default_candidates
+        )
+
+    predictions_path = (PROJECT_ROOT / args.predictions_path).resolve()
+    submission_path = (PROJECT_ROOT / args.submission_path).resolve()
 
     # ── load dataset ────────────────────────────────────────────────────────
     logger.info("Loading dataset from %s …", data_dir)
@@ -68,22 +111,9 @@ def main() -> None:
     )
 
     # ── rank ─────────────────────────────────────────────────────────────────
-    k = 20
+    k = int(config["pipeline"]["k"])
     source_weights: dict[str, float] = {
-        "global_popularity": 0.6,
-        "global_temporal_popularity": 1.4,
-        "user_genre": 1.2,
-        "user_author": 1.4,
-        "user_language": 1.0,
-        "user_publisher": 0.8,
-        "user_genre_recent": 1.5,
-        "user_author_recent": 1.6,
-        "post_incident_genre_profile": 1.7,
-        "post_incident_author_profile": 1.8,
-        "post_incident_language_profile": 1.3,
-        "post_incident_publisher_profile": 1.2,
-        "item_cooccurrence": 1.8,
-        "svd_cf": 2.0,
+        str(k_): float(v_) for k_, v_ in config["ranking"]["source_weights"].items()
     }
 
     logger.info("Running rank_predictions (k=%d) …", k)
