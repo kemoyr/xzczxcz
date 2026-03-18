@@ -75,39 +75,75 @@ def main() -> None:
     dataset = Dataset.load(data_dir)
     logger.info("Dataset loaded in %.1fs", time.perf_counter() - t0)
 
-    # ── build pseudo-incident ────────────────────────────────────────────────
+    # ── build pseudo-incident using actual incident structure ─────────────────
+    # Use the real incident period (October) so that:
+    #   (a) November post-incident data is available to generators, and
+    #   (b) masking scope mirrors the actual competition structure.
+    # Fallback to pseudo-window from clean history if no October data exists.
     positives = dataset.interactions_df[
         dataset.interactions_df["event_type"].isin([1, 2])
     ]
-    min_ts = positives["event_ts"].min()
-    clean_end = min_ts + pd.Timedelta(days=150)
-    clean_df = positives[positives["event_ts"] < clean_end].copy()
 
-    incident_end = clean_df["event_ts"].max()
-    incident_start = incident_end - pd.Timedelta(days=PSEUDO_INCIDENT_DAYS)
-    pseudo_window = clean_df[clean_df["event_ts"] >= incident_start]
-    pseudo_pairs = pseudo_window[["user_id", "edition_id"]].drop_duplicates()
+    INCIDENT_START = pd.Timestamp("2025-10-01 00:00:00")
+    INCIDENT_END = pd.Timestamp("2025-11-01 00:00:00")
+
+    incident_pos = positives[
+        (positives["event_ts"] >= INCIDENT_START)
+        & (positives["event_ts"] < INCIDENT_END)
+    ]
+    incident_pairs = incident_pos[["user_id", "edition_id"]].drop_duplicates()
+
+    if incident_pairs.empty:
+        logger.warning(
+            "No interactions found in actual incident window [%s, %s]; "
+            "falling back to pseudo-window from clean history.",
+            INCIDENT_START.date(),
+            INCIDENT_END.date(),
+        )
+        min_ts = positives["event_ts"].min()
+        clean_end = min_ts + pd.Timedelta(days=150)
+        clean_df = positives[positives["event_ts"] < clean_end].copy()
+        INCIDENT_END = clean_df["event_ts"].max()
+        INCIDENT_START = INCIDENT_END - pd.Timedelta(days=PSEUDO_INCIDENT_DAYS)
+        incident_pos = clean_df[
+            (clean_df["event_ts"] >= INCIDENT_START)
+            & (clean_df["event_ts"] < INCIDENT_END)
+        ]
+        incident_pairs = incident_pos[["user_id", "edition_id"]].drop_duplicates()
 
     rng = np.random.default_rng(SEED)
-    mask_count = max(1, int(len(pseudo_pairs) * MASK_FRACTION))
-    mask_idx = rng.choice(len(pseudo_pairs), size=mask_count, replace=False)
-    masked_pairs = pseudo_pairs.iloc[mask_idx].copy()
+    mask_count = max(1, int(len(incident_pairs) * MASK_FRACTION))
+    mask_idx = rng.choice(len(incident_pairs), size=mask_count, replace=False)
+    masked_pairs = incident_pairs.iloc[mask_idx].copy()
 
     logger.info(
         "Pseudo-incident: window=[%s, %s], total_pairs=%d, masked=%d",
-        incident_start.date(),
-        incident_end.date(),
-        len(pseudo_pairs),
+        INCIDENT_START.date(),
+        INCIDENT_END.date(),
+        len(incident_pairs),
         len(masked_pairs),
     )
 
     # ── build masked dataset ─────────────────────────────────────────────────
-    observed = clean_df.merge(
+    # Only remove masked pairs from the incident window; pre-incident clean
+    # history and post-incident (November) data remain fully visible.
+    # This matches the actual competition structure where:
+    #   - June–September: 100% visible clean history
+    #   - October (incident): 80% visible, 20% hidden (poteryashki)
+    #   - November (post-incident): 100% visible, used as profile signal
+    pre_incident = positives[positives["event_ts"] < INCIDENT_START]
+    post_incident_data = positives[positives["event_ts"] >= INCIDENT_END]
+
+    incident_observed = incident_pos.merge(
         masked_pairs.assign(_m=1), on=["user_id", "edition_id"], how="left"
     )
-    observed = observed[observed["_m"].isna()].drop(columns=["_m"])
+    incident_observed = incident_observed[incident_observed["_m"].isna()].drop(columns=["_m"])
 
-    targets = pseudo_window[["user_id"]].drop_duplicates().astype({"user_id": "int64"})
+    observed = pd.concat(
+        [pre_incident, incident_observed, post_incident_data], ignore_index=True
+    )
+
+    targets = incident_pos[["user_id"]].drop_duplicates().astype({"user_id": "int64"})
     val_seen_df = observed[["user_id", "edition_id"]].drop_duplicates()
 
     val_dataset = Dataset(
@@ -226,7 +262,7 @@ def main() -> None:
     per_user["bucket"] = pd.cut(
         per_user["n_positives"].fillna(0),
         bins=[0, 5, 20, 50, float("inf")],
-        labels=["cold (≤5)", "light (6-20)", "medium (21-50)", "heavy (>50)"],
+        labels=["cold (<=5)", "light (6-20)", "medium (21-50)", "heavy (>50)"],
     )
     bucket_ndcg = per_user.groupby("bucket", observed=True)[f"ndcg@{K}"].mean()
     logger.info("NDCG@%d by activity bucket:\n%s", K, bucket_ndcg.to_string())
